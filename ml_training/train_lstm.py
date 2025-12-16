@@ -293,7 +293,8 @@ def train_model(
 
 	# Save model in SavedModel format under lstm_saved_model/
 	saved_model_dir = os.path.join(model_out, "lstm_saved_model")
-	model.save(saved_model_dir)
+	# In Keras 3, use `export` to write a TensorFlow SavedModel.
+	model.export(saved_model_dir)
 
 	# Save scaler
 	scaler_path = os.path.join(model_out, "scaler.pkl")

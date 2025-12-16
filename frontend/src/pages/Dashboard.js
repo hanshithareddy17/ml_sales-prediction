@@ -15,55 +15,75 @@ const Dashboard = () => {
   const [analysis, setAnalysis] = useState(null);
   const [title, setTitle] = useState("");
   const [mode, setMode] = useState("actual");
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     const loadData = async () => {
-      if (mode === "actual") {
-        const res = await getActualSales();
-        setData(res.data);
-        setAnalysis(null);
-        setTitle("Actual Sales");
-      }
+      setError(null);
 
-      if (mode === "analysis") {
-        const res = await getThisYearAnalysis();
-        setAnalysis(res.analysis);
+      try {
+        if (mode === "actual") {
+          const res = await getActualSales();
+          setData(res.data);
+          setAnalysis(null);
+          setTitle("Actual Sales");
+        }
+
+        if (mode === "analysis") {
+          const res = await getThisYearAnalysis();
+          setAnalysis(res.analysis);
+          setData([]);
+          setTitle("This Year Analysis");
+        }
+
+        if (mode === "1year") {
+          const res = await getSalesForecast(12);
+          setData(
+            res.predictions.map((p) => {
+              const d = new Date(p.date);
+              return {
+                month: d.toLocaleString("default", { month: "short" }),
+                year: d.getFullYear(),
+                amount: Math.round(p.forecast),
+                type: "Predicted",
+              };
+            })
+          );
+          setAnalysis(null);
+          setTitle("Next 1 Year Prediction");
+        }
+
+        if (mode === "2year") {
+          const res = await getSalesForecast(24);
+          setData(
+            res.predictions.map((p) => {
+              const d = new Date(p.date);
+              return {
+                month: d.toLocaleString("default", { month: "short" }),
+                year: d.getFullYear(),
+                amount: Math.round(p.forecast),
+                type: "Predicted",
+              };
+            })
+          );
+          setAnalysis(null);
+          setTitle("Next 2 Years Prediction");
+        }
+      } catch (err) {
+        console.error("Failed to load data", err);
+
+        let message = "Unable to reach the backend API.";
+        if (err.response) {
+          message += ` Server responded with status ${err.response.status}: ${err.response.statusText}`;
+        } else if (err.request) {
+          message += " No response received (network error).";
+        } else if (err.message) {
+          message += ` ${err.message}`;
+        }
+
+        setError(message);
         setData([]);
-        setTitle("This Year Analysis");
-      }
-
-      if (mode === "1year") {
-        const res = await getSalesForecast(12);
-        setData(
-          res.predictions.map((p) => {
-            const d = new Date(p.date);
-            return {
-              month: d.toLocaleString("default", { month: "short" }),
-              year: d.getFullYear(),
-              amount: Math.round(p.forecast),
-              type: "Predicted",
-            };
-          })
-        );
         setAnalysis(null);
-        setTitle("Next 1 Year Prediction");
-      }
-
-      if (mode === "2year") {
-        const res = await getSalesForecast(24);
-        setData(
-          res.predictions.map((p) => {
-            const d = new Date(p.date);
-            return {
-              month: d.toLocaleString("default", { month: "short" }),
-              year: d.getFullYear(),
-              amount: Math.round(p.forecast),
-              type: "Predicted",
-            };
-          })
-        );
-        setAnalysis(null);
-        setTitle("Next 2 Years Prediction");
       }
     };
 
@@ -75,6 +95,12 @@ const Dashboard = () => {
       <Navbar onSelect={setMode} />
 
       <div className="container mt-4">
+        {error && (
+          <div className="alert alert-danger" role="alert">
+            {error}
+          </div>
+        )}
+
         {analysis && <SummaryCards data={analysis} />}
 
         {data.length > 0 && (

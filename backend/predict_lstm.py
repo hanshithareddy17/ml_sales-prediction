@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
+from keras.layers import TFSMLayer
 
 
 def _load_standard_date_sales(df: pd.DataFrame) -> pd.DataFrame:
@@ -133,7 +134,7 @@ def _inverse_first_feature(scaled_col: np.ndarray, scaler: MinMaxScaler) -> np.n
 
 
 def iterative_forecast(
-	model: tf.keras.Model,
+	model,
 	scaler: MinMaxScaler,
 	history_df: pd.DataFrame,
 	lookback: int,
@@ -255,7 +256,19 @@ def run_prediction(
 	if not os.path.isdir(saved_model_dir):
 		raise FileNotFoundError(f"SavedModel directory not found: {saved_model_dir}")
 
-	model = tf.keras.models.load_model(saved_model_dir)
+	layer = TFSMLayer(saved_model_dir, call_endpoint="serving_default")
+
+	class _WrappedModel:
+		def __init__(self, layer):
+			self.layer = layer
+
+		def predict(self, x, verbose=0):  # noqa: ARG002 - verbose kept for API compat
+			outputs = self.layer(x)
+			if isinstance(outputs, dict):
+				outputs = next(iter(outputs.values()))
+			return outputs.numpy()
+
+	model = _WrappedModel(layer)
 	scaler = load_scaler(model_dir)
 
 	history_df = load_sales_file(history_path)
@@ -305,7 +318,19 @@ def forecast_to_dataframe(
 	if not os.path.isdir(saved_model_dir):
 		raise FileNotFoundError(f"SavedModel directory not found: {saved_model_dir}")
 
-	model = tf.keras.models.load_model(saved_model_dir)
+	layer = TFSMLayer(saved_model_dir, call_endpoint="serving_default")
+
+	class _WrappedModel:
+		def __init__(self, layer):
+			self.layer = layer
+
+		def predict(self, x, verbose=0):  # noqa: ARG002 - verbose kept for API compat
+			outputs = self.layer(x)
+			if isinstance(outputs, dict):
+				outputs = next(iter(outputs.values()))
+			return outputs.numpy()
+
+	model = _WrappedModel(layer)
 	scaler = load_scaler(model_dir)
 
 	history_df = load_sales_file(history_path)

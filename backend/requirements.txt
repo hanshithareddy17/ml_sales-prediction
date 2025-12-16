@@ -1,7 +1,10 @@
 flask
 flask-cors
 tensorflow
+keras
 pandas
 numpy
 scikit-learn
 joblib
+python-dotenv
+psycopg2-binary

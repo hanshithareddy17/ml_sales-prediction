@@ -1,3 +1,5 @@
+import os
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from db import get_connection
@@ -6,8 +8,13 @@ from predict_lstm import run_prediction
 app = Flask(__name__)
 CORS(app)
 
-MODEL_DIR = "../model_dir"
-DATASET_PATH = "../Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv"
+# Resolve paths relative to the project root so they work regardless of
+# where the app is started from.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+DATASET_PATH = os.path.join(
+    BASE_DIR, "Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv"
+)
 
 
 # ---------- ACTUAL SALES (FROM POSTGRESQL) ----------

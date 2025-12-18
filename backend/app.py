@@ -1,12 +1,18 @@
 import os
 
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-from db import get_connection
+try:
+    from flask_cors import CORS
+except Exception:  # pragma: no cover
+    CORS = None
+
+import pandas as pd
+
 from predict_lstm import run_prediction
 
 app = Flask(__name__)
-CORS(app)
+if CORS is not None:
+    CORS(app)
 
 # Resolve paths relative to the project root so they work regardless of
 # where the app is started from.
@@ -15,6 +21,49 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 DATASET_PATH = os.path.join(
     BASE_DIR, "Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv"
 )
+
+
+def _load_actual_monthly_from_dataset(year: int) -> list[dict]:
+    """Return monthly totals derived from the assignment weekly-wide dataset.
+
+    Output matches the frontend expectation:
+    [{month: 'Jan', year: 2025, amount: 1234, type: 'Actual'}, ...]
+    """
+    df = pd.read_csv(DATASET_PATH)
+    weekly_cols = [
+        c
+        for c in df.columns
+        if isinstance(c, str)
+        and c.strip().upper().startswith("W")
+        and c.strip()[1:].isdigit()
+    ]
+    if not weekly_cols:
+        raise ValueError("No weekly columns (W0..Wn) found in dataset")
+
+    weekly_cols_sorted = sorted(weekly_cols, key=lambda c: int(c.strip()[1:]))
+    weekly_sum = df[weekly_cols_sorted].sum(axis=0).astype(float).values
+
+    # Map weekly totals onto real-ish dates for the requested calendar year.
+    start = pd.Timestamp(year=year, month=1, day=1)
+    start_monday = start + pd.Timedelta(days=(7 - start.weekday()) % 7)
+    weekly_dates = pd.date_range(
+        start=start_monday, periods=len(weekly_sum), freq="W-MON"
+    )
+
+    weekly_series = pd.Series(weekly_sum, index=weekly_dates)
+    monthly = weekly_series.resample("MS").sum()
+
+    out = []
+    for d, v in monthly.items():
+        out.append(
+            {
+                "month": d.strftime("%b"),
+                "year": int(d.year),
+                "amount": float(v),
+                "type": "Actual",
+            }
+        )
+    return out
 
 
 @app.route("/", methods=["GET"])
@@ -37,36 +86,29 @@ def health():
     return jsonify({"status": "ok"})
 
 
-# ---------- ACTUAL SALES (FROM POSTGRESQL) ----------
+# ---------- ACTUAL SALES (FROM DATASET) ----------
 @app.route("/actual", methods=["GET"])
 def actual_sales():
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT month, year, amount FROM actual_sales ORDER BY month")
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    data = [
-        {"month": r[0], "year": r[1], "amount": r[2], "type": "Actual"}
-        for r in rows
-    ]
+    year = request.args.get("year", default=pd.Timestamp.utcnow().year, type=int)
+    try:
+        data = _load_actual_monthly_from_dataset(year=year)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"data": data})
 
 
-# ---------- THIS YEAR ANALYSIS (FROM POSTGRESQL) ----------
+# ---------- THIS YEAR ANALYSIS (FROM DATASET) ----------
 @app.route("/analysis", methods=["GET"])
 def analysis():
-    conn = get_connection()
-    cur = conn.cursor()
+    year = request.args.get("year", default=pd.Timestamp.utcnow().year, type=int)
+    try:
+        rows = _load_actual_monthly_from_dataset(year=year)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    cur.execute("SELECT amount FROM actual_sales")
-    amounts = [r[0] for r in cur.fetchall()]
-
-    cur.close()
-    conn.close()
+    amounts = [float(r["amount"]) for r in rows]
+    if not amounts:
+        return jsonify({"error": "No amounts found"}), 400
 
     analysis = {
         "total_sales": sum(amounts),
@@ -89,23 +131,30 @@ def forecast():
         predict_months=months
     )
 
-    conn = get_connection()
-    cur = conn.cursor()
+    # Best-effort persistence (not required for assignment).
+    try:
+        from db import get_connection  # local import to avoid hard dependency
 
-    cur.execute(
-        "DELETE FROM predicted_sales WHERE forecast_type = %s",
-        (forecast_type,)
-    )
+        conn = get_connection()
+        cur = conn.cursor()
 
-    for p in result["predictions"]:
         cur.execute(
-            "INSERT INTO predicted_sales (forecast_type, forecast_date, amount) VALUES (%s,%s,%s)",
-            (forecast_type, p["date"], int(p["forecast"]))
+            "DELETE FROM predicted_sales WHERE forecast_type = %s",
+            (forecast_type,),
         )
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        for p in result.get("predictions", []):
+            cur.execute(
+                "INSERT INTO predicted_sales (forecast_type, forecast_date, amount) VALUES (%s,%s,%s)",
+                (forecast_type, p["date"], int(p["forecast"])),
+            )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        result["db_saved"] = True
+    except Exception:
+        result["db_saved"] = False
 
     return jsonify(result)
 

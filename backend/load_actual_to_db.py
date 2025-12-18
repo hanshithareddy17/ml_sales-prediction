@@ -1,4 +1,5 @@
 import os
+import argparse
 
 import pandas as pd
 from db import get_connection
@@ -7,16 +8,8 @@ from db import get_connection
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_PATH = os.path.join(BASE_DIR, "Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv")
 
-def load_actual():
-    df = pd.read_csv(CSV_PATH)
 
-    weekly_cols = [c for c in df.columns if c.startswith("W")]
-    weekly_sum = df[weekly_cols].sum()
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    # Ensure required tables exist (idempotent for dev/first setup)
+def _ensure_tables(cur):
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS actual_sales (
@@ -27,7 +20,6 @@ def load_actual():
         )
         """
     )
-
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS predicted_sales (
@@ -39,21 +31,41 @@ def load_actual():
         """
     )
 
-    
 
-    year = 2025
-    month = 1
+def load_actual(year: int = 2025, csv_path: str = CSV_PATH):
+    df = pd.read_csv(CSV_PATH)
 
-    for value in weekly_sum[:12]:
+    weekly_cols = [c for c in df.columns if isinstance(c, str) and c.strip().upper().startswith("W")]
+    weekly_sum = df[weekly_cols].sum(axis=0).astype(float).values
+
+    # Map weekly totals onto real-ish dates for the requested calendar year.
+    start = pd.Timestamp(year=year, month=1, day=1)
+    start_monday = start + pd.Timedelta(days=(7 - start.weekday()) % 7)
+    weekly_dates = pd.date_range(start=start_monday, periods=len(weekly_sum), freq="W-MON")
+    weekly_series = pd.Series(weekly_sum, index=weekly_dates)
+    monthly = weekly_series.resample("MS").sum()
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    _ensure_tables(cur)
+
+    # Replace actuals for the given year (idempotent)
+    cur.execute("DELETE FROM actual_sales WHERE year = %s", (int(year),))
+
+    for d, v in monthly.items():
         cur.execute(
             "INSERT INTO actual_sales (month, year, amount) VALUES (%s,%s,%s)",
-            (month, year, int(value))
+            (int(d.month), int(d.year), int(round(float(v)))),
         )
-        month += 1
 
     conn.commit()
     cur.close()
     conn.close()
 
 if __name__ == "__main__":
-    load_actual()
+    parser = argparse.ArgumentParser(description="Load monthly actuals into actual_sales table.")
+    parser.add_argument("--year", type=int, default=2025, help="Calendar year to label actuals")
+    parser.add_argument("--csv", default=CSV_PATH, help="Path to the assignment CSV")
+    args = parser.parse_args()
+    load_actual(year=args.year, csv_path=args.csv)

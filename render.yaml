@@ -5,3 +5,6 @@ services:
     plan: free
     buildCommand: pip install --upgrade pip setuptools wheel && pip install -r backend/requirements.txt
     startCommand: gunicorn backend.app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.7

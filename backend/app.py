@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify
 try:
@@ -19,6 +20,35 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 DATASET_PATH = os.path.join(
     BASE_DIR, "Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv"
 )
+
+
+def _read_predictions_from_db(forecast_type: str, limit: int | None = None) -> list[dict]:
+    from db import get_connection
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT forecast_date, amount
+            FROM predicted_sales
+            WHERE forecast_type = %s
+            ORDER BY forecast_date ASC
+            """,
+            (forecast_type,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    preds = [
+        {"date": r[0].strftime("%Y-%m-%d"), "forecast": float(r[1])}
+        for r in rows
+    ]
+    if limit is not None:
+        preds = preds[: int(limit)]
+    return preds
 
 
 def _load_actual_monthly_from_dataset(year: int) -> list[dict]:
@@ -159,16 +189,44 @@ def forecast():
     # instances. If we're on Render (or explicitly configured), serve
     # precomputed forecasts generated from the same trained model.
     # ------------------------------------------------------------------
-    forecast_mode = os.environ.get("FORECAST_MODE", "live").lower()
+    forecast_mode = os.environ.get("FORECAST_MODE", "db").lower()
     precomputed_path = os.path.join(
         os.path.dirname(__file__),
         "precomputed",
         f"forecast_{months}.json",
     )
 
-    # Default behavior: run live inference.
-    # For small deploy instances (e.g., Render free), set FORECAST_MODE=precomputed
-    # to serve deterministic precomputed results.
+    # Default behavior: read previously-loaded forecasts from Postgres.
+    # Use backend/load_predictions_to_db.py to generate + load values.
+    if forecast_mode == "db":
+        try:
+            predictions = _read_predictions_from_db(
+                forecast_type=forecast_type, limit=months
+            )
+        except Exception as exc:
+            return jsonify({"error": f"DB read failed: {exc}"}), 500
+
+        if not predictions:
+            return (
+                jsonify(
+                    {
+                        "error": "No predictions found in DB for this forecast_type.",
+                        "hint": "Run backend/load_predictions_to_db.py locally to populate predicted_sales.",
+                        "forecast_type": forecast_type,
+                    }
+                ),
+                400,
+            )
+
+        return jsonify(
+            {
+                "predictions": predictions,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "source": "db",
+            }
+        )
+
+    # Precomputed JSON mode (fast, no TF inference at request time)
     if forecast_mode == "precomputed":
         try:
             import json
@@ -179,6 +237,7 @@ def forecast():
         except Exception as exc:
             return jsonify({"error": f"Precomputed forecast read failed: {exc}"}), 500
     else:
+        # Live inference mode
         from predict_lstm import run_prediction
 
         result = run_prediction(
@@ -187,30 +246,31 @@ def forecast():
             predict_months=months,
         )
 
-    # Best-effort persistence (not required for assignment).
-    try:
-        from db import get_connection  # local import to avoid hard dependency
+    # Optional persistence if explicitly enabled
+    if os.environ.get("SAVE_FORECAST_TO_DB", "0") in {"1", "true", "TRUE"}:
+        try:
+            from db import get_connection
 
-        conn = get_connection()
-        cur = conn.cursor()
-
-        cur.execute(
-            "DELETE FROM predicted_sales WHERE forecast_type = %s",
-            (forecast_type,),
-        )
-
-        for p in result.get("predictions", []):
+            conn = get_connection()
+            cur = conn.cursor()
             cur.execute(
-                "INSERT INTO predicted_sales (forecast_type, forecast_date, amount) VALUES (%s,%s,%s)",
-                (forecast_type, p["date"], int(p["forecast"])),
+                "DELETE FROM predicted_sales WHERE forecast_type = %s",
+                (forecast_type,),
             )
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        result["db_saved"] = True
-    except Exception:
-        result["db_saved"] = False
+            for p in result.get("predictions", []):
+                cur.execute(
+                    """
+                    INSERT INTO predicted_sales (forecast_type, forecast_date, amount)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (forecast_type, p["date"], int(round(float(p["forecast"]))),),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            result["db_saved"] = True
+        except Exception:
+            result["db_saved"] = False
 
     return jsonify(result)
 

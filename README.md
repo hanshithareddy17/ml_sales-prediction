@@ -1,19 +1,36 @@
 # ML Sales Forecast Web App
 
-End-to-end sales forecasting app with a Flask backend (LSTM model + PostgreSQL) and a React frontend.
+End-to-end sales forecasting app with a Flask backend + React frontend.
+
+Key point: production `/forecast` is served from PostgreSQL (AWS RDS) for stability (no TensorFlow inference at request time).
 
 ## Project Structure
 
-- backend/ – Flask API, DB access, and forecasting endpoint
-- frontend/ – React dashboard (Create React App)
-- models/ – Trained LSTM model artifacts (SavedModel, scaler, metadata)
-- ml_training/ – Standalone training and ML utilities
+- `backend/`: Flask API, Postgres access, forecast loader scripts
+- `frontend/`: React dashboard
+- `models/`: trained model artifacts (SavedModel + metadata + scaler)
+- `ml_training/`: training + ML utilities used for the assignment
+
+## Backend API
+
+- `GET /health`
+- `GET /actual?year=2025` (monthly totals derived from the provided weekly-wide dataset)
+- `GET /analysis?year=2025`
+- `GET /forecast?months=12` or `months=24`
+
+## Forecast Sources (Important)
+
+The backend uses `FORECAST_MODE`:
+
+- `db` (default, recommended for Render): reads from Postgres table `predicted_sales`
+- `live`: runs TensorFlow inference on-demand (heavier; can be unstable on small instances)
+- `precomputed`: legacy mode; if precomputed JSON files are missing it automatically falls back to DB
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11
 - Node.js 18+
-- PostgreSQL (local or AWS RDS)
+- PostgreSQL (AWS RDS recommended)
 
 ## Environment Configuration
 
@@ -23,23 +40,22 @@ Copy the sample and fill in your values:
 cp .env.example .env
 ```
 
-Set the PostgreSQL connection details (for local or RDS) and adjust `REACT_APP_API_URL` when building the frontend for deployment.
+Backend accepts either `POSTGRES_*` or `DB_*` environment variables.
 
-## Local Backend Setup
+## Local Setup
 
-From the project root:
+### Backend
 
 ```bash
 python -m venv .venv
-# Windows PowerShell
-.venv\\Scripts\\Activate.ps1
+.venv\Scripts\Activate.ps1
 pip install -r backend/requirements.txt
 python backend/app.py
 ```
 
-Backend will run on http://127.0.0.1:5000.
+Backend runs at http://127.0.0.1:5000.
 
-## Local Frontend Setup
+### Frontend
 
 ```bash
 cd frontend
@@ -47,115 +63,55 @@ npm install
 npm start
 ```
 
-Open http://localhost:3000 to use the dashboard.
+Frontend runs at http://localhost:3000.
 
-## AWS Deployment (High Level)
+## Load Data Into AWS RDS (one-time / whenever you reset)
 
-### 1. Database (AWS RDS PostgreSQL)
+These scripts create tables (if missing), delete existing rows, then reload:
 
-- Create a PostgreSQL RDS instance.
-- Open port 5432 to your app (security group).
-- Put the RDS endpoint, DB name, user, and password into `.env` on the backend host.
+- `backend/load_actual_to_db.py` loads monthly actuals into `actual_sales`
+- `backend/load_predictions_to_db.py` generates predictions locally and inserts into `predicted_sales`
+- `backend/reset_and_load_rds.py` runs both in a single step
 
-### 2. Backend on EC2 (or similar)
-
-On your EC2 instance:
+Run (after setting your `.env` with RDS credentials):
 
 ```bash
-git clone <your-repo-url>.git
-cd ml_sales-prediction
-python -m venv .venv
-source .venv/bin/activate  # or .venv\\Scripts\\activate on Windows
-pip install -r backend/requirements.txt
-cp .env.example .env  # then edit with RDS details
-python backend/app.py  # or run via gunicorn/uwsgi behind Nginx
+python backend/reset_and_load_rds.py
 ```
 
-Expose port 5000 via a security group or put Nginx/ALB in front of it.
+## Deploy Backend To Render (final)
 
-### 3. Frontend on S3/CloudFront (or EC2)
+This repo includes `render.yaml` configured for a Python web service.
 
-Build the production bundle with the correct API URL:
+1. Create a new Render **Web Service** from your GitHub repo.
+2. Render will read `render.yaml`.
+3. In Render → Environment, set your DB credentials (either `DB_*` or `POSTGRES_*`).
+4. Ensure `FORECAST_MODE=db` (recommended).
 
-```bash
-cd frontend
-REACT_APP_API_URL="https://your-backend-domain" npm run build
-```
+After deploy:
 
-Then deploy the `frontend/build` directory to:
+- `https://<your-render-service>.onrender.com/health`
+- `https://<your-render-service>.onrender.com/forecast?months=12`
 
-- An S3 bucket + CloudFront distribution, or
-- A web server (e.g. Nginx) on EC2.
+## ML Training (Assignment)
 
-Once this is done, the same codebase you commit to GitHub can be used both locally and on AWS by just changing environment variables.
+The ML training scripts live in `ml_training/`.
 
-## ML Training and Forecasting
-
-The `ml_training/` folder contains **only the Machine Learning deliverables** for the assignment.
-
-### Files in ml_training/
-
-- `train_lstm.py`  
-  - Loads the weekly assignment dataset `Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv`.
-  - Converts it into a 2-feature time series (total weekly sales + mean normalized value).
-  - Trains an LSTM model with lookback 12 and saves artifacts into `models/`:
-    - `lstm_saved_model/` – TensorFlow SavedModel.
-    - `scaler.pkl` – MinMaxScaler used for scaling the time series.
-    - `metadata.json` – training configuration and validation metrics.
-
-- `predict_lstm.py`  
-  - Loads the trained model and scaler from `models/`.
-  - Reads the same dataset format as training.
-  - Generates multi-step forecasts and outputs either JSON (via CLI) or a pandas DataFrame (via `forecast_to_dataframe`).
-
-These two scripts together implement your **ML role**: data preparation, model training, and forecasting.
-
-### Required external files
-
-The following files are **used by the ML code** but live outside this folder:
-
-- Training data (provided in the assignment):
-  - `Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv`
-
-- Trained model artifacts (already generated by `train_lstm.py`):
-  - `models/` at the project root, containing:
-    - `lstm_saved_model/`
-    - `scaler.pkl`
-    - `metadata.json`
-
-Your teammates can re-train the model or reuse the existing `models`.
-
-### How to train the model (ML part)
-
-From the project root (for example, `D:\Aspyr_final\ml_sales-prediction`):
+Train:
 
 ```bash
-py -3.10 ml_training/train_lstm.py \
+py -3.11 ml_training/train_lstm.py \
   --input Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv \
   --model_out models \
   --epochs 50
 ```
 
-This will store the trained model and metadata in `models/`.
-
-### How to generate forecasts (ML part)
-
-CLI JSON output:
+Generate a forecast JSON (ML-only):
 
 ```bash
-py -3.10 ml_training/predict_lstm.py \
+py -3.11 ml_training/predict_lstm.py \
   --model_dir models \
   --history Assignment-3-ML-Sales_Transactions_Dataset_Weekly.csv \
   --predict_months 12 \
   --out test_forecast.json
 ```
-
-### Model accuracy (for your ML discussion)
-
-From the latest training run on the weekly dataset:
-
-- Validation MAE: ~63.37 units
-- Validation RMSE: ~81.84 units
-- Validation MAPE: ~0.90 %
-
-This means the average error on the last 12 weeks is less than 1% of actual total sales, which is very accurate for this dataset.

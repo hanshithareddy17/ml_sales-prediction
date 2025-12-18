@@ -2,8 +2,8 @@
 frontend/node_modules/
 
 # Python
-backend/__pycache__/
-backend/*.pyc
+**/__pycache__/
+**/*.pyc
 venv/
 .venv/
 

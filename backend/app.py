@@ -185,9 +185,8 @@ def forecast():
     forecast_type = "1year" if months == 12 else "2year"
 
     # ------------------------------------------------------------------
-    # Render stability: TensorFlow inference can crash the worker on small
-    # instances. If we're on Render (or explicitly configured), serve
-    # precomputed forecasts generated from the same trained model.
+    # Forecast source is environment-driven.
+    # Prefer DB mode for stability in small deployments.
     # ------------------------------------------------------------------
     forecast_mode = os.environ.get("FORECAST_MODE", "db").lower()
     precomputed_path = os.path.join(
@@ -234,6 +233,35 @@ def forecast():
             with open(precomputed_path, "r", encoding="utf-8") as f:
                 result = json.load(f)
             result["precomputed"] = True
+        except FileNotFoundError:
+            # If precomputed files were cleaned up, fall back to DB mode.
+            try:
+                predictions = _read_predictions_from_db(
+                    forecast_type=forecast_type, limit=months
+                )
+            except Exception as exc:
+                return jsonify({"error": f"Precomputed missing; DB read failed: {exc}"}), 500
+
+            if not predictions:
+                return (
+                    jsonify(
+                        {
+                            "error": "Precomputed missing and no predictions found in DB.",
+                            "hint": "Run backend/load_predictions_to_db.py locally to populate predicted_sales.",
+                            "forecast_type": forecast_type,
+                        }
+                    ),
+                    400,
+                )
+
+            return jsonify(
+                {
+                    "predictions": predictions,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "db",
+                    "note": "Fell back to DB because precomputed file was missing.",
+                }
+            )
         except Exception as exc:
             return jsonify({"error": f"Precomputed forecast read failed: {exc}"}), 500
     else:

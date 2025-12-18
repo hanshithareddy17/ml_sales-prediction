@@ -159,21 +159,17 @@ def forecast():
     # instances. If we're on Render (or explicitly configured), serve
     # precomputed forecasts generated from the same trained model.
     # ------------------------------------------------------------------
-    forecast_mode = os.environ.get("FORECAST_MODE", "auto").lower()
+    forecast_mode = os.environ.get("FORECAST_MODE", "live").lower()
     precomputed_path = os.path.join(
         os.path.dirname(__file__),
         "precomputed",
         f"forecast_{months}.json",
     )
 
-    # Default behavior: if we have a precomputed forecast file for the
-    # requested horizon, serve it. This avoids TF inference crashes on small
-    # deploy instances and makes the demo deterministic.
-    use_precomputed = forecast_mode in {"auto", "precomputed"} and os.path.isfile(
-        precomputed_path
-    )
-
-    if use_precomputed:
+    # Default behavior: run live inference.
+    # For small deploy instances (e.g., Render free), set FORECAST_MODE=precomputed
+    # to serve deterministic precomputed results.
+    if forecast_mode == "precomputed":
         try:
             import json
 
@@ -183,8 +179,6 @@ def forecast():
         except Exception as exc:
             return jsonify({"error": f"Precomputed forecast read failed: {exc}"}), 500
     else:
-        # Live inference path (opt-in via FORECAST_MODE=live or when no
-        # precomputed file exists).
         from predict_lstm import run_prediction
 
         result = run_prediction(

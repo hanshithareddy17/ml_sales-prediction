@@ -219,9 +219,10 @@ def iterative_forecast(
 	scaler_params: dict,
 	history_df: pd.DataFrame,
 	lookback: int,
-	predict_months: int,
+	predict_steps: int,
+	future_freq: str,
 ):
-	"""Iteratively forecast `predict_months` steps ahead.
+	"""Iteratively forecast `predict_steps` steps ahead.
 
 	Uses the same multi-feature structure as training:
 	- The model outputs a scaled prediction for the first feature only
@@ -230,8 +231,8 @@ def iterative_forecast(
 	  last known feature vector and replacing its first element with the
 	  predicted scaled value.
 	"""
-	if predict_months <= 0:
-		raise ValueError("predict_months must be positive")
+	if predict_steps <= 0:
+		raise ValueError("predict_steps must be positive")
 	if len(history_df) < lookback:
 		raise ValueError("Not enough history to run iterative forecast")
 
@@ -242,7 +243,7 @@ def iterative_forecast(
 	history_list = scaled_history.tolist()
 	scaled_predictions = []
 
-	for _ in range(predict_months):
+	for _ in range(predict_steps):
 		window = np.array(history_list[-lookback:], dtype="float32").reshape(
 			1, lookback, n_features
 		)
@@ -257,10 +258,37 @@ def iterative_forecast(
 	scaled_arr = np.array(scaled_predictions, dtype="float32").reshape(-1, 1)
 	forecasts = _minmax_inverse_first_feature(scaled_arr, scaler_params)
 
-	# Base monthly index; may be remapped depending on date_mode
+	# Base future index; may be remapped depending on date_mode
 	last_date = history_df.index[-1]
-	future_dates = pd.date_range(last_date, periods=predict_months + 1, freq="MS")[1:]
+	future_dates = pd.date_range(last_date, periods=predict_steps + 1, freq=future_freq)[1:]
 	return future_dates, forecasts
+
+
+def _weekly_forecast_to_monthly(
+	weekly_values: np.ndarray,
+	predict_months: int,
+	start_year: int,
+) -> tuple[pd.DatetimeIndex, np.ndarray]:
+	"""Convert weekly forecasts into monthly totals using a real calendar.
+
+	The assignment dataset is weekly-wide and the model is trained on weekly
+	totals. The UI expects monthly totals, so we map the weekly predictions
+	onto Mondays in the target calendar year and resample to month starts.
+	"""
+	if predict_months <= 0:
+		raise ValueError("predict_months must be positive")
+	weekly_values = np.asarray(weekly_values, dtype="float32").reshape(-1)
+
+	start = pd.Timestamp(year=start_year, month=1, day=1)
+	start_monday = start + pd.Timedelta(days=(7 - start.weekday()) % 7)
+	weekly_dates = pd.date_range(
+		start=start_monday, periods=len(weekly_values), freq="W-MON"
+	)
+
+	weekly_series = pd.Series(weekly_values, index=weekly_dates)
+	monthly = weekly_series.resample("MS").sum()
+	monthly = monthly.iloc[:predict_months]
+	return monthly.index, monthly.values.astype("float32")
 
 
 def _map_output_dates(
@@ -323,6 +351,7 @@ def run_prediction(
 	model = _load_saved_model_for_inference(saved_model_dir)
 
 	history_df = load_sales_file(history_path)
+	date_mode = metadata.get("date_mode") or history_df.attrs.get("date_mode", "unknown")
 
 	# Fit scaling params exactly like training: fit on training portion only
 	# and reserve the last 12 steps for validation.
@@ -336,25 +365,51 @@ def run_prediction(
 	n_train = n_total - n_val_steps
 	scaler_params = _fit_minmax_scaler(values[:n_train])
 
-	future_dates_raw, forecasts = iterative_forecast(
-		model=model,
-		scaler_params=scaler_params,
-		history_df=history_df,
-		lookback=lookback,
-		predict_months=predict_months,
-	)
+	if date_mode == "synthetic_weekly":
+		# The model is trained on weekly steps. Forecast weekly totals and then
+		# aggregate into monthly totals for UI consistency.
+		weeks_per_year = 52
+		steps = int(round(predict_months * (weeks_per_year / 12.0)))
+		_, weekly_forecasts = iterative_forecast(
+			model=model,
+			scaler_params=scaler_params,
+			history_df=history_df,
+			lookback=lookback,
+			predict_steps=steps,
+			future_freq="W-MON",
+		)
 
-	mapped_dates = _map_output_dates(
-		future_dates=future_dates_raw,
-		predict_months=predict_months,
-		metadata=metadata,
-		history_df=history_df,
-	)
+		start_year = datetime.now().year + 1
+		mapped_dates, monthly_forecasts = _weekly_forecast_to_monthly(
+			weekly_values=weekly_forecasts,
+			predict_months=predict_months,
+			start_year=start_year,
+		)
+		predictions = [
+			{"date": d.strftime("%Y-%m-%d"), "forecast": float(v)}
+			for d, v in zip(mapped_dates, monthly_forecasts)
+		]
+	else:
+		future_dates_raw, forecasts = iterative_forecast(
+			model=model,
+			scaler_params=scaler_params,
+			history_df=history_df,
+			lookback=lookback,
+			predict_steps=predict_months,
+			future_freq="MS",
+		)
 
-	predictions = [
-		{"date": d.strftime("%Y-%m-%d"), "forecast": float(v)}
-		for d, v in zip(mapped_dates, forecasts)
-	]
+		mapped_dates = _map_output_dates(
+			future_dates=future_dates_raw,
+			predict_months=predict_months,
+			metadata=metadata,
+			history_df=history_df,
+		)
+
+		predictions = [
+			{"date": d.strftime("%Y-%m-%d"), "forecast": float(v)}
+			for d, v in zip(mapped_dates, forecasts)
+		]
 
 	result = {
 		"predictions": predictions,

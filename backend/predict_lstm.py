@@ -7,7 +7,53 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
-from keras.layers import TFSMLayer
+
+
+def _load_saved_model_for_inference(saved_model_dir: str):
+	"""Load a TensorFlow SavedModel for inference with a .predict(x) API.
+
+	We avoid keras.layers.TFSMLayer here because it can be environment-sensitive
+	(and has caused crashes in some deploy targets). This loader prefers
+	tf.keras.models.load_model when available, and falls back to calling a
+	SavedModel signature directly.
+	"""
+	# Preferred: tf.keras model load
+	try:
+		model = tf.keras.models.load_model(saved_model_dir)
+		# Sanity: ensure it has predict
+		_ = getattr(model, "predict")
+		return model
+	except Exception:
+		pass
+
+	# Fallback: signature-based inference
+	loaded = tf.saved_model.load(saved_model_dir)
+	infer = loaded.signatures.get("serving_default")
+	if infer is None:
+		infer = next(iter(loaded.signatures.values()))
+
+	class _SignatureModel:
+		def __init__(self, infer_fn):
+			self._infer = infer_fn
+
+		def predict(self, x, verbose=0):  # noqa: ARG002 - verbose kept for API compat
+			x_tf = tf.convert_to_tensor(x)
+			try:
+				_, kw = self._infer.structured_input_signature
+				expected = list(kw.keys())
+			except Exception:
+				expected = []
+
+			if expected:
+				outputs = self._infer(**{expected[0]: x_tf})
+			else:
+				outputs = self._infer(x_tf)
+
+			if isinstance(outputs, dict):
+				outputs = next(iter(outputs.values()))
+			return outputs.numpy()
+
+	return _SignatureModel(infer)
 
 
 def _load_standard_date_sales(df: pd.DataFrame) -> pd.DataFrame:
@@ -256,19 +302,7 @@ def run_prediction(
 	if not os.path.isdir(saved_model_dir):
 		raise FileNotFoundError(f"SavedModel directory not found: {saved_model_dir}")
 
-	layer = TFSMLayer(saved_model_dir, call_endpoint="serving_default")
-
-	class _WrappedModel:
-		def __init__(self, layer):
-			self.layer = layer
-
-		def predict(self, x, verbose=0):  # noqa: ARG002 - verbose kept for API compat
-			outputs = self.layer(x)
-			if isinstance(outputs, dict):
-				outputs = next(iter(outputs.values()))
-			return outputs.numpy()
-
-	model = _WrappedModel(layer)
+	model = _load_saved_model_for_inference(saved_model_dir)
 	scaler = load_scaler(model_dir)
 
 	history_df = load_sales_file(history_path)
